@@ -681,26 +681,7 @@ def export_data():
     workbook.save(file_path)
 
     return send_file(file_path, as_attachment=True, download_name='leftover_feed_data.xlsx')
-
-#@app.route('/pellet_counts')
-#@login_required
-#def pellet_counts():
-    #global object_count
-
-    # Simulate timestamps (current time for each label)
-    #timestamps = [time.strftime('%H:%M:%S') for _ in object_count]
-
-    # Extract counts from object_count
-    #counts = list(object_count.values())
-
-    # Prepare data for Chart.js
-    #data = {
-        #'labels': timestamps,
-        #'data': counts
-    #}
-
-    #return jsonify(data)
-
+    
 @app.route('/update', methods=['GET', 'POST'])
 @login_required
 def update_setting():
@@ -725,6 +706,13 @@ def update_setting():
 
                 db['Time_Record'] = Time_Record_dict
                 db.close()
+                
+                user_email = session.get("user_email")
+                first_timer = setting.first_timer.data
+                second_timer = setting.second_timer.data
+                feeding_duration = setting.seconds.data
+
+                schedule_feeding_alerts(first_timer, second_timer, feeding_duration, user_email)
                 return redirect(url_for('dashboard'))
             elif not(6 <= first_hour <= 12):
                 setting.first_timer.errors.append('First timer should be between 06:00 and 12:00 (morning to afternoon).')
@@ -752,6 +740,65 @@ def update_setting():
         setting.confidence.data = j.get_confidence()
         return render_template('settings.html', form=setting)
 
+def send_feeding_complete_email(user_email, feed_time):
+    with app.app_context():
+        try:
+            msg = Message("Feeding Complete",
+                          recipients=["heyitskale2@gmail.com"],
+                          body= f"The {feed_time} has been completed",
+                          sender=("Admin", "klwad766@gmail.com")
+                          )
+            msg.body = f"The {feed_time} has been completed."
+            mail.send(msg)
+            print(f"Email sent to {user_email} for {feed_time}.")
+        except Exception as e:
+            print(f"Error sending email: {e}")
+
+def schedule_feeding_alerts(first_timer, second_timer, feeding_duration, user_email):
+    try:
+        now = datetime.now()  # Use current date for scheduling
+        first_timer_dt = now.replace(hour=int(first_timer[:2]), minute=int(first_timer[3:]), second=0, microsecond=0)
+        second_timer_dt = now.replace(hour=int(second_timer[:2]), minute=int(second_timer[3:]), second=0, microsecond=0)
+
+        feeding_duration = int(feeding_duration)
+
+        # Localize the datetime objects
+        timezone = pytz.timezone("Asia/Singapore")
+        first_end_time = timezone.localize(first_timer_dt + timedelta(seconds=feeding_duration))
+        second_end_time = timezone.localize(second_timer_dt + timedelta(seconds=feeding_duration))
+
+        # Ensure feeding times are in the future
+        if first_end_time < timezone.localize(now):
+            print("First feeding time is in the past. Skipping scheduling.")
+        else:
+            print("Scheduling first feeding alert at:", first_end_time)
+            scheduler.add_job(
+                func=send_feeding_complete_email,
+                trigger='date',
+                run_date=first_end_time,
+                args=[user_email, "first feeding complete"],
+                id='first_feeding_alert',
+                misfire_grace_time=3600  # Allow a 1-hour grace period for missed jobs
+            )
+
+        if second_end_time < timezone.localize(now):
+            print("Second feeding time is in the past. Skipping scheduling.")
+        else:
+            print("Scheduling second feeding alert at:", second_end_time)
+            scheduler.add_job(
+                func=send_feeding_complete_email,
+                trigger='date',
+                run_date=second_end_time,
+                args=[user_email, "second feeding complete"],
+                id='second_feeding_alert',
+                misfire_grace_time=3600  # Allow a 1-hour grace period for missed jobs
+            )
+
+    except ValueError as e:
+        print(f"Error parsing time: {e}")
+    except Exception as e:
+        print(f"Scheduling error: {e}")
+        
 @app.route('/update/email', methods=['GET', 'POST'])
 def update_email_settings():
     setting = emailForm(request.form)
@@ -781,34 +828,7 @@ def update_email_settings():
         setting.App_password.data = j.get_APPPassword()
         setting.days.data = j.get_days()
         return render_template('email_settings.html', form=setting)
-
-#@app.route('/data_analysis/feeding_time')
-#def line_chart():
-    #db = shelve.open('line_chart_data.db', 'r')
-    #Line_Chart_Data_dict = db.get('Line_Chart_Data',{})
-    #days = []
-    #timer = []
-
-    # Iterate over the last seven days
-    #for i in range(6, -1, -1):
-        # Calculate the date for the current iteration
-        #current_date = (datetime.today() - timedelta(days=i)).strftime("%Y-%m-%d")
-
-        # Check if the current date exists in the Line_Chart_Data_dict
-        #if current_date in Line_Chart_Data_dict:
-            # Get the Line_Chart_Data object for the current date
-            #object = Line_Chart_Data_dict[current_date]
-            # Append the date and corresponding time record to the lists
-            #days.append(object.get_date())
-            #timer.append(object.get_timeRecord())
-
-    # Print or process the data as needed
-    #for day, time_record in zip(days, timer):
-        #print(f"{day}: {time_record}")
-
-    #db.close()
-    #return render_template('feeding_line_chart.html', days = days, timer = timer)
-
+        
 @app.route('/video_feed')
 def video_feed():
     try:
@@ -816,6 +836,38 @@ def video_feed():
     except Exception as e:
         print(f"Error: {e}")
         return "Error generating video feed"
+        
+@app.route('/feedback', methods=['GET', 'POST'])
+def feedback():
+    form = FeedbackForm()
+    user_email = session.get('email')  # Retrieve the email from the session
+
+    if not user_email:
+        flash('Please log in to access the feedback form.', 'danger')
+        return redirect(url_for('login'))
+
+    if form.validate_on_submit():
+        try:
+            # Attempt to compose and send the email
+            msg = Message(
+                subject="New Feedback",
+                sender=user_email,
+                recipients=['klwad766@gmail.com'],
+                body=f"Name: {form.name.data}\nEmail: {user_email}\nMessage:\n{form.message.data}"
+            )
+            mail.send(msg)
+
+            # Flash success message and redirect to dashboard
+            flash('Your feedback has been sent successfully!', 'success')
+            return redirect(url_for('dashboard'))
+
+        except Exception as e:
+            # Flash error message in case of failure
+            flash('An error occurred while sending your feedback. Please try again.', 'danger')
+            # Log the error for debugging purposes (optional)
+            app.logger.error(f'Feedback form error: {e}')
+
+    return render_template('feedback.html', form=form)
 
 def sending_email():
     import os
@@ -969,7 +1021,7 @@ if __name__ == '__main__':
         db.close()
 
         #  create the line chart database
-        db = shelve.open('line_chart_data.db', 'c')
+        db = shelve.open('line_chart_data.db', 'c') 
         # Get today's date
         today = datetime.today()
         for i in range(7):
